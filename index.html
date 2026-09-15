@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>명지전문대 보물찾기</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; font-family:'Apple SD Gothic Neo','Malgun Gothic',sans-serif; }
+  #map { height:100%; width:100%; }
+
+  /* 상단 HUD */
+  #hud {
+    position:fixed; top:0; left:0; right:0; z-index:1000;
+    background:rgba(20,24,35,0.92); color:#fff;
+    padding:10px 14px; display:flex; justify-content:space-between; align-items:center;
+    backdrop-filter:blur(6px);
+  }
+  #hud .title { font-weight:700; font-size:15px; }
+  #hud .stats { font-size:13px; display:flex; gap:12px; }
+  #hud .stats b { color:#ffd54f; }
+
+  /* 힌트 배너 */
+  #hint {
+    position:fixed; bottom:80px; left:50%; transform:translateX(-50%);
+    z-index:1000; background:rgba(20,24,35,0.9); color:#fff;
+    padding:10px 18px; border-radius:24px; font-size:14px;
+    white-space:nowrap; transition:background .3s;
+  }
+  #hint.hot  { background:rgba(211,47,47,0.92); }
+  #hint.warm { background:rgba(245,124,0,0.92); }
+  #hint.cold { background:rgba(25,118,210,0.92); }
+
+  /* GPS 정확도 표시 */
+  #gpsInfo {
+    position:fixed; bottom:34px; left:50%; transform:translateX(-50%);
+    z-index:1000; font-size:11px; color:#555;
+    background:rgba(255,255,255,0.85); padding:3px 10px; border-radius:12px;
+  }
+
+  /* 발견 팝업 */
+  #foundModal {
+    position:fixed; inset:0; z-index:2000; display:none;
+    background:rgba(0,0,0,0.6); align-items:center; justify-content:center;
+  }
+  #foundModal .card {
+    background:#fff; border-radius:16px; padding:28px 24px; text-align:center;
+    width:80%; max-width:320px; animation:pop .3s ease;
+  }
+  @keyframes pop { from { transform:scale(0.7); opacity:0; } to { transform:scale(1); opacity:1; } }
+  #foundModal .emoji { font-size:52px; }
+  #foundModal h2 { margin:10px 0 6px; font-size:20px; }
+  #foundModal p { color:#666; font-size:14px; margin-bottom:16px; }
+  #foundModal button {
+    background:#1976d2; color:#fff; border:none; padding:10px 28px;
+    border-radius:24px; font-size:15px; font-weight:600;
+  }
+
+  /* 시작 화면 */
+  #startScreen {
+    position:fixed; inset:0; z-index:3000; background:#141823;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    color:#fff; text-align:center; padding:24px;
+  }
+  #startScreen h1 { font-size:26px; margin-bottom:8px; }
+  #startScreen p { color:#aab; font-size:14px; line-height:1.6; margin-bottom:24px; }
+  #startScreen button {
+    background:#ffd54f; color:#141823; border:none; padding:14px 40px;
+    border-radius:28px; font-size:17px; font-weight:700;
+  }
+  #startScreen .warn { margin-top:18px; font-size:12px; color:#e57373; }
+</style>
+</head>
+<body>
+
+<div id="startScreen">
+  <h1>🗺️ 명지전문대 보물찾기</h1>
+  <p>캠퍼스를 돌아다니며 숨겨진 보물을 찾으세요!<br>
+     보물 근처(15m)에 도달하면 자동으로 발견됩니다.<br>
+     힌트 배너가 뜨겁다/차갑다를 알려줍니다.</p>
+  <button onclick="startGame()">게임 시작</button>
+  <div class="warn" id="startWarn"></div>
+</div>
+
+<div id="hud" style="display:none">
+  <div class="title">🗺️ 캠퍼스 보물찾기</div>
+  <div class="stats">
+    <span>보물 <b id="score">0</b>/<span id="total">0</span></span>
+    <span>⏱ <b id="timer">00:00</b></span>
+  </div>
+</div>
+
+<div id="map"></div>
+<div id="hint" style="display:none">위치 확인 중...</div>
+<div id="gpsInfo" style="display:none">GPS: -</div>
+
+<div id="foundModal">
+  <div class="card">
+    <div class="emoji">🎁</div>
+    <h2 id="foundName"></h2>
+    <p id="foundDesc"></p>
+    <button onclick="closeModal()">계속 찾기</button>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+/* ================================================================
+   설정 — 반드시 본인 VWorld API 키로 교체하세요
+   발급: https://www.vworld.kr → 회원가입 → 오픈API → 인증키 신청
+   ※ 키 신청 시 "서비스 URL"에 배포할 도메인(예: username.github.io)을
+     등록해야 합니다. localhost도 개발용으로 등록 가능.
+   ================================================================ */
+const VWORLD_KEY = "D836CF3B-0F03-4AB6-8E0C-4836CF33CDAA";
+
+// 배경지도: "Base"(일반지도) 또는 "Satellite"(항공영상, 확장자 jpeg)
+const USE_SATELLITE = false;
+
+/* ── 보물 목록: 구글맵/VWorld에서 우클릭으로 실제 좌표 채취 후 교체 ── */
+const treasures = [
+  { id:1, lat:37.58480, lng:126.92600, r:15, name:"본관 앞 보물",   desc:"본관 정문 근처에서 발견!" },
+  { id:2, lat:37.58520, lng:126.92680, r:15, name:"도서관 보물",    desc:"지식의 전당에 숨어 있던 보물!" },
+  { id:3, lat:37.58440, lng:126.92530, r:15, name:"운동장 보물",    desc:"넓은 운동장 한가운데!" },
+  { id:4, lat:37.58560, lng:126.92620, r:20, name:"학생회관 보물",  desc:"학생들의 아지트에서 발견!" },
+  { id:5, lat:37.58410, lng:126.92660, r:15, name:"정문 보물",      desc:"캠퍼스의 시작점!" },
+];
+
+/* ================== 이하 게임 로직 ================== */
+let map, meMarker, accCircle, watchId = null;
+let startTime = null, timerInterval = null;
+let found = JSON.parse(localStorage.getItem('mjc_found') || '[]');
+const markers = {};
+
+function initMap() {
+  map = L.map('map', { zoomControl:false }).setView([37.5848, 126.9260], 17);
+
+  const layer = USE_SATELLITE ? "Satellite" : "Base";
+  const ext = USE_SATELLITE ? "jpeg" : "png";
+  L.tileLayer(`https://api.vworld.kr/req/wmts/1.0.0/${VWORLD_KEY}/${layer}/{z}/{y}/{x}.${ext}`, {
+    attribution:'&copy; <a href="https://www.vworld.kr">VWorld</a> 국토교통부',
+    minZoom:7, maxZoom:19
+  }).addTo(map);
+
+  // 내 위치 마커
+  meMarker = L.circleMarker([0,0], { radius:9, color:'#fff', weight:2, fillColor:'#1976d2', fillOpacity:1 });
+  accCircle = L.circle([0,0], { radius:0, color:'#1976d2', weight:1, fillOpacity:0.08 });
+
+  // 보물 마커 (발견 전엔 물음표 영역만 표시)
+  treasures.forEach(t => {
+    const isFound = found.includes(t.id);
+    markers[t.id] = L.circle([t.lat, t.lng], {
+      radius:t.r,
+      color: isFound ? '#4caf50' : '#ff9800',
+      fillColor: isFound ? '#4caf50' : '#ff9800',
+      fillOpacity:0.25
+    }).addTo(map).bindPopup(isFound ? `✅ ${t.name}` : "❓ 미발견 보물");
+  });
+
+  document.getElementById('total').textContent = treasures.length;
+  document.getElementById('score').textContent = found.length;
+}
+
+function dist(la1, lo1, la2, lo2) { // Haversine (m)
+  const R = 6371e3, p = Math.PI/180;
+  const a = Math.sin((la2-la1)*p/2)**2 +
+            Math.cos(la1*p)*Math.cos(la2*p)*Math.sin((lo2-lo1)*p/2)**2;
+  return 2*R*Math.asin(Math.sqrt(a));
+}
+
+function startGame() {
+  if (!('geolocation' in navigator)) {
+    document.getElementById('startWarn').textContent = "이 기기는 위치 서비스를 지원하지 않습니다.";
+    return;
+  }
+  if (location.protocol !== 'https:' && !['localhost','127.0.0.1'].includes(location.hostname)) {
+    document.getElementById('startWarn').textContent = "⚠️ HTTPS 환경에서만 GPS가 동작합니다. (localhost 제외)";
+    return;
+  }
+  document.getElementById('startScreen').style.display = 'none';
+  document.getElementById('hud').style.display = 'flex';
+  document.getElementById('hint').style.display = 'block';
+  document.getElementById('gpsInfo').style.display = 'block';
+
+  startTime = Date.now();
+  timerInterval = setInterval(() => {
+    const s = Math.floor((Date.now() - startTime)/1000);
+    document.getElementById('timer').textContent =
+      String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
+  }, 1000);
+
+  watchId = navigator.geolocation.watchPosition(onPos, onErr, {
+    enableHighAccuracy:true, maximumAge:1000, timeout:10000
+  });
+}
+
+let firstFix = true;
+function onPos(pos) {
+  const { latitude:lat, longitude:lng, accuracy } = pos.coords;
+
+  meMarker.setLatLng([lat, lng]).addTo(map);
+  accCircle.setLatLng([lat, lng]).setRadius(accuracy).addTo(map);
+  document.getElementById('gpsInfo').textContent = `GPS 오차 ±${Math.round(accuracy)}m`;
+
+  if (firstFix) { map.setView([lat, lng], 18); firstFix = false; }
+
+  // 미발견 보물 중 가장 가까운 것 → 힌트
+  let nearest = null, nd = Infinity;
+  treasures.forEach(t => {
+    if (found.includes(t.id)) return;
+    const d = dist(lat, lng, t.lat, t.lng);
+    if (d < nd) { nd = d; nearest = t; }
+    if (d < t.r + Math.min(accuracy, 10)) foundTreasure(t); // 오차 일부 보정
+  });
+
+  const hint = document.getElementById('hint');
+  if (!nearest) {
+    hint.textContent = "🎉 모든 보물을 찾았습니다!";
+    hint.className = "";
+  } else {
+    let cls, msg;
+    if (nd < 30)       { cls='hot';  msg=`🔥 매우 뜨거움! (${Math.round(nd)}m)`; }
+    else if (nd < 80)  { cls='warm'; msg=`♨️ 따뜻함 (${Math.round(nd)}m)`; }
+    else if (nd < 200) { cls='cold'; msg=`❄️ 차가움 (${Math.round(nd)}m)`; }
+    else               { cls='cold'; msg=`🧊 매우 차가움 (${Math.round(nd)}m)`; }
+    hint.textContent = msg; hint.className = cls;
+  }
+}
+
+function onErr(e) {
+  const msgs = {1:"위치 권한이 거부되었습니다. 브라우저 설정에서 허용하세요.",
+                2:"위치를 확인할 수 없습니다.", 3:"위치 확인 시간 초과."};
+  document.getElementById('hint').textContent = "⚠️ " + (msgs[e.code] || e.message);
+}
+
+function foundTreasure(t) {
+  if (found.includes(t.id)) return;
+  found.push(t.id);
+  localStorage.setItem('mjc_found', JSON.stringify(found));
+  document.getElementById('score').textContent = found.length;
+  markers[t.id].setStyle({ color:'#4caf50', fillColor:'#4caf50' }).bindPopup(`✅ ${t.name}`);
+  if (navigator.vibrate) navigator.vibrate([100,50,200]);
+  document.getElementById('foundName').textContent = "🎁 " + t.name;
+  document.getElementById('foundDesc').textContent = t.desc;
+  document.getElementById('foundModal').style.display = 'flex';
+}
+
+function closeModal() { document.getElementById('foundModal').style.display = 'none'; }
+
+// 화면 꺼짐/백그라운드 시 GPS 중단 → 배터리 절약
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && watchId !== null) {
+    navigator.geolocation.clearWatch(watchId); watchId = null;
+  } else if (!document.hidden && startTime && watchId === null) {
+    watchId = navigator.geolocation.watchPosition(onPos, onErr, {
+      enableHighAccuracy:true, maximumAge:1000, timeout:10000
+    });
+  }
+});
+
+initMap();
+</script>
+</body>
+</html>
